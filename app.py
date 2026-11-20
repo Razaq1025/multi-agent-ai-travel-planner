@@ -2,7 +2,10 @@ import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
 
+from agents.itinerary_agent import refine_itinerary
+from agents.review_agent import run_review_agent
 from services.langgraph_planner import run_multi_agent_planner
+from services.route_optimizer import optimize_itinerary_routes
 from utils.schemas import TripRequest
 
 
@@ -15,7 +18,7 @@ st.set_page_config(
 st.title("✈️ Multi-Agent AI-Based Personalized Travel Planner")
 st.caption(
     "Orchestrated with LangGraph & Google Gemini • Deterministic Financial Engine • "
-    "Transparent Data Provenance (AI-Estimated vs. Deterministic)"
+    "Google OR-Tools Route Optimization • Transparent Data Provenance"
 )
 
 st.divider()
@@ -132,156 +135,211 @@ if submitted:
             st.error(f"Input validation error: {ve}")
             st.stop()
 
-        with st.spinner("Coordinating specialized AI agents via LangGraph..."):
-            result = run_multi_agent_planner(trip_request)
+        with st.spinner("Coordinating specialized AI agents & OR-Tools optimizer via LangGraph..."):
+            st.session_state["travel_plan"] = run_multi_agent_planner(trip_request)
 
-        st.success(f"Personalized travel plan ready for **{result['resolved_destination']}**!")
 
-        # Multi-Agent Execution Trace & Review Status
-        with st.expander("🧠 Multi-Agent LangGraph Execution Trace & Validation Report", expanded=False):
-            for step in result["execution_trace"]:
-                st.write(f"✅ {step}")
-            review = result["review_report"]
-            st.info(f"**Budget Validation:** {review.budget_status}")
-            st.info(f"**Schedule Validation:** {review.schedule_status}")
+if "travel_plan" in st.session_state:
+    result = st.session_state["travel_plan"]
+    trip_request = result["request"]
 
-        # Top KPI Summary
-        expense = result["expense_summary"]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Primary Destination", result["resolved_destination"])
-        m2.metric("Duration & Group", f"{trip_request.days}D / {trip_request.travellers} Pax")
-        m3.metric("Total Budget", f"₹{trip_request.total_budget:,.0f}")
-        m4.metric(
-            "Estimated Trip Cost",
-            f"₹{expense['total_estimated_cost']:,.0f}",
-            delta=f"₹{expense['remaining_or_overrun']:,.0f} buffer"
-            if expense["within_budget"]
-            else f"-₹{abs(expense['remaining_or_overrun']):,.0f} overrun",
-        )
+    st.success(f"Personalized travel plan ready for **{result['resolved_destination']}**!")
+
+    # Multi-Agent Execution Trace & Optimization Status
+    with st.expander("🧠 Multi-Agent LangGraph Execution Trace & OR-Tools Report", expanded=False):
+        for step in result["execution_trace"]:
+            st.write(f"✅ {step}")
+        review = result["review_report"]
+        metrics = result.get("route_metrics") or {}
+        st.info(f"**Budget Validation:** {review.budget_status}")
+        st.info(f"**Schedule Validation:** {review.schedule_status}")
+        if metrics:
+            st.info(
+                f"**OR-Tools Spatial Optimization:** Solver `{metrics.get('solver')}` • "
+                f"Transit Distance: `{metrics.get('optimized_transit_km')} km` "
+                f"(Saved `{metrics.get('distance_saved_km')} km`; Coordinate source: `{metrics.get('coordinate_source')}`)"
+            )
+
+    # Top KPI Summary
+    expense = result["expense_summary"]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Primary Destination", result["resolved_destination"])
+    m2.metric("Duration & Group", f"{trip_request.days}D / {trip_request.travellers} Pax")
+    m3.metric("Total Budget", f"₹{trip_request.total_budget:,.0f}")
+    m4.metric(
+        "Estimated Trip Cost",
+        f"₹{expense['total_estimated_cost']:,.0f}",
+        delta=f"₹{expense['remaining_or_overrun']:,.0f} buffer"
+        if expense["within_budget"]
+        else f"-₹{abs(expense['remaining_or_overrun']):,.0f} overrun",
+    )
+
+    st.divider()
+
+    tab_itin, tab_budget, tab_stay_travel, tab_dest_weather = st.tabs(
+        [
+            "🗓️ Day-wise Itinerary & Food",
+            "💰 Budget Breakdown & Expenses",
+            "🚆 Transport & Accommodation",
+            "🌍 Destinations & Weather",
+        ]
+    )
+
+    # TAB 1: Day-wise Itinerary, Food & Interactive Modification
+    with tab_itin:
+        itin_out = result["itinerary_output"]
+        st.caption(f"Data Source: `{itin_out.data_source}` (Geographically clustered & OR-Tools route-ordered)")
+
+        for day in itin_out.days:
+            with st.expander(
+                f"Day {day.day}: {day.theme} — Zone: {day.area_focus} (Est. ₹{day.estimated_day_cost:,.0f})",
+                expanded=True,
+            ):
+                for act in day.activities:
+                    st.markdown(
+                        f"**{act.time_slot} — {act.place_name}** ({act.area}) • "
+                        f"⏱️ {act.estimated_duration_hours} hrs • 💵 Est. ₹{act.estimated_cost_total:,.0f}"
+                    )
+                    st.write(act.description)
+                if day.recommended_restaurants:
+                    st.markdown(
+                        "🍽️ **Recommended Restaurants & Local Food:** "
+                        + ", ".join(day.recommended_restaurants)
+                    )
+
+        if itin_out.overall_tips:
+            st.subheader("💡 Smart Travel Tips")
+            for tip in itin_out.overall_tips:
+                st.write(f"- {tip}")
 
         st.divider()
+        st.subheader("✏️ Modify Your Existing Itinerary")
+        with st.form("modify_itinerary_form"):
+            mod_text = st.text_input(
+                "What would you like to change?",
+                placeholder="e.g. Make Day 2 more relaxed and replace afternoon shopping with a sunset cruise",
+            )
+            mod_submitted = st.form_submit_button("🔄 Update Itinerary & Re-Optimize Routes")
 
-        tab_itin, tab_budget, tab_stay_travel, tab_dest_weather = st.tabs(
-            [
-                "🗓️ Day-wise Itinerary & Food",
-                "💰 Budget Breakdown & Expenses",
-                "🚆 Transport & Accommodation",
-                "🌍 Destinations & Weather",
-            ]
-        )
-
-        # TAB 1: Day-wise Itinerary & Food
-        with tab_itin:
-            itin_out = result["itinerary_output"]
-            st.caption(f"Data Source: `{itin_out.data_source}` (Geographically clustered per day)")
-            for day in itin_out.days:
-                with st.expander(
-                    f"Day {day.day}: {day.theme} — Zone: {day.area_focus} (Est. ₹{day.estimated_day_cost:,.0f})",
-                    expanded=True,
-                ):
-                    for act in day.activities:
-                        st.markdown(
-                            f"**{act.time_slot} — {act.place_name}** ({act.area}) • "
-                            f"⏱️ {act.estimated_duration_hours} hrs • 💵 Est. ₹{act.estimated_cost_total:,.0f}"
-                        )
-                        st.write(act.description)
-                    if day.recommended_restaurants:
-                        st.markdown(
-                            "🍽️ **Recommended Restaurants & Local Food:** "
-                            + ", ".join(day.recommended_restaurants)
-                        )
-
-            if itin_out.overall_tips:
-                st.subheader("💡 Smart Travel Tips")
-                for tip in itin_out.overall_tips:
-                    st.write(f"- {tip}")
-
-        # TAB 2: Budget Allocation & Expense Reconciliation
-        with tab_budget:
-            alloc = result["budget_allocation"]
-            st.caption(f"Data Source: `{alloc.data_source}` (Exact financial reconciliation)")
-
-            for warn in alloc.warnings:
-                st.warning(warn)
-
-            budget_rows = [
-                {
-                    "Category": c.category,
-                    "Share (%)": f"{c.percentage:.1f}%",
-                    "Allocated Total (₹)": f"₹{c.allocated_amount:,.2f}",
-                    "Per Person (₹)": f"₹{c.per_person_amount:,.2f}",
-                    "Coverage Notes": c.notes,
-                }
-                for c in alloc.categories
-            ]
-            st.dataframe(pd.DataFrame(budget_rows), width="stretch", hide_index=True)
-
-            st.subheader("Estimated Expense Reconciliation")
-            st.write(f"- **Total User Budget:** ₹{alloc.total_budget:,.2f}")
-            st.write(f"- **Spendable Budget (Excl. 5% Emergency Reserve):** ₹{expense['spendable_budget']:,.2f}")
-            st.write(f"- **Agent-Estimated Total Cost:** ₹{expense['total_estimated_cost']:,.2f}")
-            st.write(f"- **Remaining Buffer / Overrun:** ₹{expense['remaining_or_overrun']:,.2f}")
-
-        # TAB 3: Transportation & Accommodation
-        with tab_stay_travel:
-            trans = result["transport_output"]
-            accom = result["accommodation_output"]
-
-            st.subheader("🚆 Transportation Options")
-            st.caption(f"Data Source: `{trans.data_source}` (Estimated fares, not live booking quotes)")
-            for idx, opt in enumerate(trans.options):
-                badge = " ⭐ Recommended" if idx == trans.recommended_option_index else ""
-                with st.container(border=True):
-                    st.markdown(f"**{opt.mode} — {opt.operator_or_route}**{badge}")
-                    st.write(
-                        f"⏱️ Duration: **{opt.estimated_duration}** | "
-                        f"💵 Est. Total ({trip_request.travellers} pax): **₹{opt.estimated_total_cost:,.0f}**"
+        if mod_submitted:
+            if not mod_text.strip():
+                st.warning("Please enter a modification instruction first.")
+            else:
+                with st.spinner("Refining itinerary, re-running OR-Tools & validating budget..."):
+                    updated_itin = refine_itinerary(
+                        request=trip_request,
+                        resolved_destination=result["resolved_destination"],
+                        allocation=result["budget_allocation"],
+                        current_itinerary=itin_out,
+                        modification_instruction=mod_text.strip(),
                     )
-                    st.write(f"Why it fits: {opt.pros}")
-
-            st.subheader("🏨 Accommodation Recommendations")
-            st.caption(f"Data Source: `{accom.data_source}` (Estimated nightly tariffs)")
-            for idx, stay in enumerate(accom.options):
-                badge = " ⭐ Recommended" if idx == accom.recommended_option_index else ""
-                with st.container(border=True):
-                    st.markdown(f"**{stay.name}** ({stay.category} • {stay.area}){badge}")
-                    st.write(
-                        f"🌙 Per Night: **₹{stay.estimated_cost_per_night:,.0f}** | "
-                        f"💵 Total Stay: **₹{stay.estimated_total_cost:,.0f}**"
+                    opt_days, new_metrics = optimize_itinerary_routes(
+                        destination=result["resolved_destination"],
+                        days=updated_itin.days,
                     )
-                    st.write("Highlights: " + ", ".join(stay.highlights))
+                    updated_itin = updated_itin.model_copy(update={"days": opt_days})
+                    new_review = run_review_agent(
+                        request=trip_request,
+                        allocation=result["budget_allocation"],
+                        transport=result["transport_output"],
+                        accommodation=result["accommodation_output"],
+                        itinerary=updated_itin,
+                    )
+                    result["itinerary_output"] = updated_itin
+                    result["route_metrics"] = new_metrics
+                    result["review_report"] = new_review
+                    result["execution_trace"].append(
+                        f"Interactive Refinement: Applied '{mod_text.strip()}' + OR-Tools re-optimization."
+                    )
+                    st.session_state["travel_plan"] = result
+                st.rerun()
 
-        # TAB 4: Destinations & Weather
-        with tab_dest_weather:
-            dest_out = result["destination_output"]
-            weather = result["weather_output"]
+    # TAB 2: Budget Allocation & Expense Reconciliation
+    with tab_budget:
+        alloc = result["budget_allocation"]
+        st.caption(f"Data Source: `{alloc.data_source}` (Exact financial reconciliation)")
 
-            st.subheader("🌍 Destination Analysis & Alternatives")
-            st.caption(f"Data Source: `{dest_out.data_source}`")
-            prim = dest_out.primary_destination
+        for warn in alloc.warnings:
+            st.warning(warn)
+
+        budget_rows = [
+            {
+                "Category": c.category,
+                "Share (%)": f"{c.percentage:.1f}%",
+                "Allocated Total (₹)": f"₹{c.allocated_amount:,.2f}",
+                "Per Person (₹)": f"₹{c.per_person_amount:,.2f}",
+                "Coverage Notes": c.notes,
+            }
+            for c in alloc.categories
+        ]
+        st.dataframe(pd.DataFrame(budget_rows), width="stretch", hide_index=True)
+
+        st.subheader("Estimated Expense Reconciliation")
+        st.write(f"- **Total User Budget:** ₹{alloc.total_budget:,.2f}")
+        st.write(f"- **Spendable Budget (Excl. 5% Emergency Reserve):** ₹{expense['spendable_budget']:,.2f}")
+        st.write(f"- **Agent-Estimated Total Cost:** ₹{expense['total_estimated_cost']:,.2f}")
+        st.write(f"- **Remaining Buffer / Overrun:** ₹{expense['remaining_or_overrun']:,.2f}")
+
+    # TAB 3: Transportation & Accommodation
+    with tab_stay_travel:
+        trans = result["transport_output"]
+        accom = result["accommodation_output"]
+
+        st.subheader("🚆 Transportation Options")
+        st.caption(f"Data Source: `{trans.data_source}` (Estimated fares, not live booking quotes)")
+        for idx, opt in enumerate(trans.options):
+            badge = " ⭐ Recommended" if idx == trans.recommended_option_index else ""
             with st.container(border=True):
-                st.markdown(f"### Primary Choice: {prim.name} ({prim.region_or_country})")
-                st.write(prim.why_it_fits)
+                st.markdown(f"**{opt.mode} — {opt.operator_or_route}**{badge}")
                 st.write(
-                    f"**Best For:** {', '.join(prim.best_for)} | "
-                    f"**Est. Daily Cost/Person:** ₹{prim.estimated_daily_cost_per_person:,.0f}"
+                    f"⏱️ Duration: **{opt.estimated_duration}** | "
+                    f"💵 Est. Total ({trip_request.travellers} pax): **₹{opt.estimated_total_cost:,.0f}**"
                 )
+                st.write(f"Why it fits: {opt.pros}")
 
-            st.markdown("#### Alternative Destinations Within Similar Budget")
-            alt_cols = st.columns(max(1, len(dest_out.alternatives)))
-            for col, alt in zip(alt_cols, dest_out.alternatives):
-                with col:
-                    with st.container(border=True):
-                        st.markdown(f"**{alt.name}** ({alt.region_or_country})")
-                        st.write(alt.why_it_fits)
-                        st.caption(f"Est. ₹{alt.estimated_daily_cost_per_person:,.0f}/person/day")
+        st.subheader("🏨 Accommodation Recommendations")
+        st.caption(f"Data Source: `{accom.data_source}` (Estimated nightly tariffs)")
+        for idx, stay in enumerate(accom.options):
+            badge = " ⭐ Recommended" if idx == accom.recommended_option_index else ""
+            with st.container(border=True):
+                st.markdown(f"**{stay.name}** ({stay.category} • {stay.area}){badge}")
+                st.write(
+                    f"🌙 Per Night: **₹{stay.estimated_cost_per_night:,.0f}** | "
+                    f"💵 Total Stay: **₹{stay.estimated_total_cost:,.0f}**"
+                )
+                st.write("Highlights: " + ", ".join(stay.highlights))
 
-            st.divider()
-            st.subheader("🌦️ Seasonal Weather & Indoor Backups")
-            st.caption(f"Data Source: `{weather.data_source}`")
-            st.write(f"**Expected Conditions:** {weather.expected_condition}")
-            st.write(f"**Temperature Range:** {weather.temperature_range_c}")
-            st.info(f"**Advisory:** {weather.travel_advisory}")
-            st.markdown("**Indoor Backup Alternatives:**")
-            for idea in weather.indoor_backup_ideas:
-                st.write(f"- {idea}")
+    # TAB 4: Destinations & Weather
+    with tab_dest_weather:
+        dest_out = result["destination_output"]
+        weather = result["weather_output"]
+
+        st.subheader("🌍 Destination Analysis & Alternatives")
+        st.caption(f"Data Source: `{dest_out.data_source}`")
+        prim = dest_out.primary_destination
+        with st.container(border=True):
+            st.markdown(f"### Primary Choice: {prim.name} ({prim.region_or_country})")
+            st.write(prim.why_it_fits)
+            st.write(
+                f"**Best For:** {', '.join(prim.best_for)} | "
+                f"**Est. Daily Cost/Person:** ₹{prim.estimated_daily_cost_per_person:,.0f}"
+            )
+
+        st.markdown("#### Alternative Destinations Within Similar Budget")
+        alt_cols = st.columns(max(1, len(dest_out.alternatives)))
+        for col, alt in zip(alt_cols, dest_out.alternatives):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{alt.name}** ({alt.region_or_country})")
+                    st.write(alt.why_it_fits)
+                    st.caption(f"Est. ₹{alt.estimated_daily_cost_per_person:,.0f}/person/day")
+
+        st.divider()
+        st.subheader("🌦️ Seasonal Weather & Indoor Backups")
+        st.caption(f"Data Source: `{weather.data_source}`")
+        st.write(f"**Expected Conditions:** {weather.expected_condition}")
+        st.write(f"**Temperature Range:** {weather.temperature_range_c}")
+        st.info(f"**Advisory:** {weather.travel_advisory}")
+        st.markdown("**Indoor Backup Alternatives:**")
+        for idea in weather.indoor_backup_ideas:
+            st.write(f"- {idea}")

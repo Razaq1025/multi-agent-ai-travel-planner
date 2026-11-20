@@ -8,6 +8,7 @@ from agents.review_agent import run_review_agent
 from agents.transport_agent import run_transport_agent
 from agents.weather_agent import run_weather_agent
 from services.budget_engine import allocate_budget, validate_estimated_expenses
+from services.route_optimizer import optimize_itinerary_routes
 from utils.schemas import (
     AccommodationAgentOutput,
     BudgetAllocation,
@@ -29,6 +30,7 @@ class TravelGraphState(TypedDict):
     transport_output: Optional[TransportAgentOutput]
     accommodation_output: Optional[AccommodationAgentOutput]
     itinerary_output: Optional[ItineraryAgentOutput]
+    route_metrics: Optional[Dict[str, Any]]
     review_report: Optional[ReviewReport]
     revision_count: int
     replan_feedback: str
@@ -57,7 +59,7 @@ def destination_node(state: TravelGraphState) -> Dict[str, Any]:
 def weather_node(state: TravelGraphState) -> Dict[str, Any]:
     weather_out = run_weather_agent(state["request"], state["resolved_destination"])
     trace = list(state.get("execution_trace", []))
-    trace.append("Weather Agent: Analyzed seasonal forecast & indoor backups.")
+    trace.append(f"Weather Agent: Analyzed forecast ({weather_out.data_source}) & indoor backups.")
     return {"weather_output": weather_out, "execution_trace": trace}
 
 
@@ -96,6 +98,25 @@ def itinerary_node(state: TravelGraphState) -> Dict[str, Any]:
     trace = list(state.get("execution_trace", []))
     trace.append("Itinerary Agent: Built geographically clustered day-wise schedule & food picks.")
     return {"itinerary_output": itin_out, "execution_trace": trace}
+
+
+def optimize_routes_node(state: TravelGraphState) -> Dict[str, Any]:
+    itin_out = state["itinerary_output"]
+    optimized_days, metrics = optimize_itinerary_routes(
+        destination=state["resolved_destination"],
+        days=itin_out.days,
+    )
+    updated_itin = itin_out.model_copy(update={"days": optimized_days})
+    trace = list(state.get("execution_trace", []))
+    trace.append(
+        f"OR-Tools Route Optimizer: Optimized intra-day paths "
+        f"(saved {metrics['distance_saved_km']} km transit; coords: {metrics['coordinate_source']})."
+    )
+    return {
+        "itinerary_output": updated_itin,
+        "route_metrics": metrics,
+        "execution_trace": trace,
+    }
 
 
 def review_node(state: TravelGraphState) -> Dict[str, Any]:
@@ -139,6 +160,7 @@ def build_travel_graph():
     workflow.add_node("transport", transport_node)
     workflow.add_node("accommodation", accommodation_node)
     workflow.add_node("itinerary", itinerary_node)
+    workflow.add_node("optimize_routes", optimize_routes_node)
     workflow.add_node("review", review_node)
 
     workflow.set_entry_point("budget")
@@ -147,7 +169,8 @@ def build_travel_graph():
     workflow.add_edge("weather", "transport")
     workflow.add_edge("transport", "accommodation")
     workflow.add_edge("accommodation", "itinerary")
-    workflow.add_edge("itinerary", "review")
+    workflow.add_edge("itinerary", "optimize_routes")
+    workflow.add_edge("optimize_routes", "review")
 
     workflow.add_conditional_edges(
         "review",
@@ -163,8 +186,8 @@ def build_travel_graph():
 
 def run_multi_agent_planner(request: TripRequest) -> Dict[str, Any]:
     """
-    Executes the full LangGraph multi-agent travel planning pipeline and returns
-    a unified structured dictionary including expense reconciliation.
+    Executes the full LangGraph multi-agent travel planning pipeline (including OR-Tools
+    route optimization) and returns a unified structured dictionary.
     """
     graph = build_travel_graph()
     initial_state: TravelGraphState = {
@@ -176,6 +199,7 @@ def run_multi_agent_planner(request: TripRequest) -> Dict[str, Any]:
         "transport_output": None,
         "accommodation_output": None,
         "itinerary_output": None,
+        "route_metrics": None,
         "review_report": None,
         "revision_count": 0,
         "replan_feedback": "",
@@ -215,6 +239,7 @@ def run_multi_agent_planner(request: TripRequest) -> Dict[str, Any]:
         "transport_output": transport,
         "accommodation_output": accommodation,
         "itinerary_output": itinerary,
+        "route_metrics": final_state["route_metrics"],
         "review_report": final_state["review_report"],
         "expense_summary": expense_summary,
         "execution_trace": final_state["execution_trace"],

@@ -65,3 +65,39 @@ def run_itinerary_agent(
     )
     result.data_source = "ai_estimated"
     return result
+
+
+def refine_itinerary(
+    request: TripRequest,
+    resolved_destination: str,
+    allocation: BudgetAllocation,
+    current_itinerary: ItineraryAgentOutput,
+    modification_instruction: str,
+) -> ItineraryAgentOutput:
+    """
+    Modifies an existing day-wise itinerary based on user feedback while preserving
+    budget constraints and geographic clustering.
+    """
+    food_budget = _get_category_budget(allocation, "Food")
+    activities_budget = _get_category_budget(allocation, "Activities")
+    total_allowed = round(food_budget + activities_budget, 2)
+
+    prompt = (
+        f"Destination: {resolved_destination}\n"
+        f"Duration: {request.days} days | Travellers: {request.travellers}\n"
+        f"Dietary Preferences: {request.dietary_preferences}\n"
+        f"Combined Food + Activities Budget Ceiling: ₹{total_allowed:,.2f}\n\n"
+        f"CURRENT ITINERARY (JSON):\n{current_itinerary.model_dump_json(indent=2)}\n\n"
+        f"USER MODIFICATION REQUEST:\n{modification_instruction}\n\n"
+        "Update the itinerary to satisfy the user's modification request while keeping "
+        "unchanged days intact, preserving geographic clustering per day, and staying within "
+        "the budget ceiling. Set data_source to 'ai_estimated'."
+    )
+
+    result = generate_structured(
+        prompt=prompt,
+        response_schema=ItineraryAgentOutput,
+        system_instruction=SYSTEM_INSTRUCTION,
+    )
+    result.data_source = "ai_estimated"
+    return result
